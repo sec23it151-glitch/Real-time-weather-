@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gemini Weather</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="importmap">
+    {
+      "imports": {
+        "@google/genai": "https://aistudiocdn.com/@google/genai@^1.29.0"
+      }
+    }
+    </script>
+    <style>
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .animate-spin {
+            animation: spin 1s linear infinite;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-in {
+            animation: fadeIn 0.5s ease-out forwards;
+        }
+        /* Custom styles for the toggle switch */
+        .toggle-checkbox:checked + .toggle-label .dot {
+            transform: translateX(1.5rem);
+        }
+        .toggle-checkbox:checked + .toggle-label {
+            background-color: #3b82f6; /* bg-blue-500 */
+        }
+    </style>
+</head>
+<body class="bg-gray-900">
+
+<div id="app" class="min-h-screen flex flex-col items-center justify-center bg-gradient-to-br from-gray-900 to-slate-800 text-white p-4 font-sans">
+    <div class="w-full max-w-md mx-auto">
+        <h1 class="text-4xl md:text-5xl font-bold text-center mb-2 text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-teal-300">
+            Gemini Weather
+        </h1>
+        <p class="text-center text-gray-400 mb-8">Real-time weather powered by AI</p>
+        
+        <form id="weather-form" class="flex gap-2 mb-4">
+            <input
+                id="city-input"
+                type="text"
+                name="city"
+                value="Tokyo"
+                placeholder="Enter city name..."
+                class="flex-grow bg-gray-700/50 border border-gray-600 rounded-lg px-4 py-2 text-white placeholder-gray-400 focus:ring-2 focus:ring-blue-500 focus:outline-none transition"
+            />
+            <button
+                id="submit-button"
+                type="submit"
+                class="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-500 disabled:cursor-not-allowed text-white font-bold py-2 px-4 rounded-lg transition duration-300"
+            >
+                Search
+            </button>
+        </form>
+
+        <div id="weather-container" class="bg-white/10 backdrop-blur-md rounded-xl shadow-lg p-6 min-h-[360px] flex flex-col justify-center">
+            <!-- Weather content will be injected here -->
+        </div>
+
+        <div class="mt-6 flex flex-col sm:flex-row justify-between items-center text-sm text-gray-400">
+            <label for="auto-refresh-toggle" class="flex items-center cursor-pointer">
+                <div class="relative">
+                    <input id="auto-refresh-toggle" type="checkbox" class="sr-only toggle-checkbox" />
+                    <div class="toggle-label block w-14 h-8 rounded-full bg-gray-600 transition-colors"></div>
+                    <div class="dot absolute left-1 top-1 bg-white w-6 h-6 rounded-full transition-transform"></div>
+                </div>
+                <div class="ml-3 text-gray-200 font-medium">Auto-refresh (10s)</div>
+            </label>
+            <p id="last-updated" class="mt-2 sm:mt-0"></p>
+        </div>
+    </div>
+</div>
+
+<script type="module">
+    import { GoogleGenAI } from "@google/genai";
+
+    // --- DOM Elements ---
+    const weatherForm = document.getElementById('weather-form');
+    const cityInput = document.getElementById('city-input');
+    const submitButton = document.getElementById('submit-button');
+    const weatherContainer = document.getElementById('weather-container');
+    const autoRefreshToggle = document.getElementById('auto-refresh-toggle');
+    const lastUpdatedEl = document.getElementById('last-updated');
+
+    // --- State ---
+    let state = {
+        city: 'Tokyo',
+        weather: null,
+        loading: true,
+        error: null,
+        lastUpdated: null,
+        autoRefresh: false,
+    };
+    let autoRefreshInterval = null;
+    let lastUpdatedInterval = null;
+
+    // --- Gemini API Service ---
+    const API_KEY = process.env.API_KEY;
+    if (!API_KEY) {
+        state.error = "API_KEY is not configured.";
+        render();
+    }
+    const ai = new GoogleGenAI({ apiKey: API_KEY });
+
+    async function fetchWeather(city) {
+        const prompt = `Provide the current weather for ${city}. Return the response as a single JSON object only, with no other text, explanation, or markdown formatting. The JSON object must have these exact keys: "city", "country", "temperature" (in Celsius), "feels_like" (in Celsius), "condition" (e.g., "Clear", "Clouds", "Rain", "Snow", "Drizzle", "Haze"), "humidity" (as a percentage number), and "wind_speed" (in km/h).`;
+
+        try {
+            const response = await ai.models.generateContent({
+                model: "gemini-2.5-flash",
+                contents: prompt,
+                config: {
+                    tools: [{ googleSearch: {} }],
+                    temperature: 0,
+                },
+            });
+
+            const text = response.text;
+            const startIndex = text.indexOf('{');
+            const endIndex = text.lastIndexOf('}');
+
+            if (startIndex === -1 || endIndex === -1 || endIndex < startIndex) {
+                throw new Error("No valid JSON object found in API response.");
+            }
+
+            const jsonString = text.substring(startIndex, endIndex + 1);
+            const data = JSON.parse(jsonString);
+
+            if (typeof data.city !== 'string' || typeof data.country !== 'string' || typeof data.temperature !== 'number' || typeof data.feels_like !== 'number' || typeof data.condition !== 'string' || typeof data.humidity !== 'number' || typeof data.wind_speed !== 'number') {
+                throw new Error("Invalid data structure from API");
+            }
+
+            return data;
+        } catch (error) {
+            console.error("Error fetching weather data:", error);
+            if (error instanceof SyntaxError) {
+                throw new Error("Failed to parse weather data. API returned an unexpected format.");
+            }
+            if (error instanceof Error && (error.message.startsWith("No valid JSON") || error.message.startsWith("Invalid data"))) {
+                throw error;
+            }
+            throw new Error("Could not fetch weather data. Check the city name and try again.");
+        }
+    }
+
+    // --- UI Rendering ---
+
+    const ICONS = {
+        sun: `<svg xmlns="http://www.w3.org/2000/svg" class="w-full h-full" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>`,
+        cloud: `<svg xmlns="http://www.w3.org/2000/svg" class="w-full h-full" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"></path></svg>`,
+        rain: `<svg xmlns="http://www.w3.org/2000/svg" class="w-full h-full" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 16.2A4.5 4.5 0 0 0 17.5 8h-1.8A7 7 0 1 0 4 14.9"></path><path d="M16 14v6"></path><path d="M8 14v6"></path><path d="M12 16v6"></path></svg>`,
+        snow: `<svg xmlns="http://www.w3.org/2000/svg" class="w-full h-full" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 17.5A5 5 0 0 0 15 13H9.29A6.99 6.99 0 0 0 3 16.6C3 20.1 5.9 23 9.4 23h9.2c2.5 0 4.4-1.9 4.4-4.4 0-1.2-.5-2.3-1.2-3.1z"></path><path d="m9.29 16.6-.7-1.2.7-1.2.7 1.2-.7 1.2z"></path><path d="m13.29 19.6-.7-1.2.7-1.2.7 1.2-.7 1.2z"></path><path d="m17.29 16.6-.7-1.2.7-1.2.7 1.2-.7 1.2z"></path></svg>`,
+        drizzle: `<svg xmlns="http://www.w3.org/2000/svg" class="w-full h-full" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"></path><path d="M8 19v1"></path><path d="M8 14v1"></path><path d="M16 19v1"></path><path d="M16 14v1"></path><path d="M12 21v1"></path><path d="M12 16v1"></path></svg>`,
+        haze: `<svg xmlns="http://www.w3.org/2000/svg" class="w-full h-full" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6.5A5.5 5.5 0 1 1 6.5 12 5.5 5.5 0 0 1 12 6.5Z"></path><path d="M12 3v1"></path><path d="M12 20v1"></path><path d="M3 12h1"></path><path d="M20 12h1"></path><path d="m18.36 5.64-.7.7"></path><path d="m6.34 17.66-.7.7"></path><path d="m18.36 18.36-.7-.7"></path><path d="m6.34 6.34-.7-.7"></path><path d="M3 16h18"></path><path d="M3 20h18"></path></svg>`
+    };
+
+    function getWeatherIcon(condition) {
+        const norm = condition.toLowerCase();
+        if (norm.includes('clear') || norm.includes('sun')) return ICONS.sun;
+        if (norm.includes('rain')) return ICONS.rain;
+        if (norm.includes('snow')) return ICONS.snow;
+        if (norm.includes('drizzle')) return ICONS.drizzle;
+        if (norm.includes('haze') || norm.includes('mist') || norm.includes('fog')) return ICONS.haze;
+        if (norm.includes('cloud')) return ICONS.cloud;
+        return ICONS.cloud; // Default
+    }
+
+    function render() {
+        submitButton.disabled = state.loading;
+        submitButton.textContent = state.loading ? '...' : 'Search';
+
+        if (state.loading) {
+            weatherContainer.innerHTML = `
+                <div class="flex flex-col items-center justify-center text-gray-300">
+                    <svg class="animate-spin h-10 w-10 text-white mb-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    <p>Fetching latest weather data...</p>
+                </div>`;
+        } else if (state.error) {
+            weatherContainer.innerHTML = `
+                <div class="text-center text-red-400">
+                    <h3 class="font-bold text-lg mb-2">Error</h3>
+                    <p>${state.error}</p>
+                </div>`;
+        } else if (state.weather) {
+            const w = state.weather;
+            weatherContainer.innerHTML = `
+                <div class="text-center animate-fade-in">
+                    <h2 class="text-3xl font-bold">${w.city}, ${w.country}</h2>
+                    <p class="text-gray-300 mb-4">${w.condition}</p>
+                    <div class="flex items-center justify-center gap-4 my-6">
+                        <div class="w-24 h-24 text-yellow-300">${getWeatherIcon(w.condition)}</div>
+                        <div class="text-6xl font-extrabold">${Math.round(w.temperature)}&deg;C</div>
+                    </div>
+                    <div class="bg-black/20 rounded-lg p-4 grid grid-cols-3 gap-4 text-sm">
+                        <div>
+                            <p class="text-gray-400">Feels Like</p>
+                            <p class="font-bold text-lg">${Math.round(w.feels_like)}&deg;C</p>
+                        </div>
+                        <div>
+                            <p class="text-gray-400">Humidity</p>
+                            <p class="font-bold text-lg">${w.humidity}%</p>
+                        </div>
+                        <div>
+                            <p class="text-gray-400">Wind</p>
+                            <p class="font-bold text-lg">${w.wind_speed} km/h</p>
+                        </div>
+                    </div>
+                </div>`;
+        } else {
+             weatherContainer.innerHTML = `
+                <div class="text-center text-gray-400">
+                    <p>Enter a city to get the weather.</p>
+                </div>`;
+        }
+        updateLastUpdated();
+    }
+    
+    function updateLastUpdated() {
+        if (!state.lastUpdated || state.loading) {
+            lastUpdatedEl.textContent = '';
+            return;
+        }
+        const seconds = Math.floor((new Date().getTime() - state.lastUpdated.getTime()) / 1000);
+        if (seconds < 5) {
+            lastUpdatedEl.textContent = 'Last updated: just now';
+        } else {
+            lastUpdatedEl.textContent = `Last updated: ${seconds} seconds ago`;
+        }
+    }
+
+    // --- Logic & Event Handlers ---
+    
+    async function getWeatherData(city) {
+        if (!city) return;
+        state = { ...state, loading: true, error: null };
+        render();
+
+        try {
+            const data = await fetchWeather(city);
+            state = { ...state, weather: data, error: null, lastUpdated: new Date() };
+        } catch (err) {
+            state = { ...state, error: err.message || 'An unknown error occurred', weather: null };
+        } finally {
+            state = { ...state, loading: false };
+            render();
+        }
+    }
+
+    weatherForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const newCity = cityInput.value.trim();
+        if (newCity && newCity !== state.city) {
+            state.city = newCity;
+            getWeatherData(newCity);
+        } else if (newCity) {
+            getWeatherData(newCity);
+        }
+    });
+
+    autoRefreshToggle.addEventListener('change', (e) => {
+        state.autoRefresh = e.target.checked;
+        if (state.autoRefresh) {
+            if (autoRefreshInterval) clearInterval(autoRefreshInterval);
+            autoRefreshInterval = setInterval(() => getWeatherData(state.city), 10000);
+        } else {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+            }
+        }
+    });
+
+    // --- Initial Load ---
+    function init() {
+        if (lastUpdatedInterval) clearInterval(lastUpdatedInterval);
+        lastUpdatedInterval = setInterval(updateLastUpdated, 1000);
+        getWeatherData(state.city);
+    }
+
+    init();
+
+</script>
+</body>
+</html>

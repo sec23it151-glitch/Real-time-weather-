@@ -1,0 +1,5 @@
+{
+  "name": " Real-Time Weather ",
+  "description": "A sleek, real-time weather application powered by the Gemini API. It fetches current weather data for any city and features an auto-refresh option to stay updated every 10 seconds.",
+  "requestFramePermissions": []
+}
